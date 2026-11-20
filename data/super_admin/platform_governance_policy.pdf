@@ -1,0 +1,129 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1114 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Platform Access Governance Policy \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(1. Purpose. This fictional policy describes how privileged access to the Finova demo) Tj
+0 -15 Td
+/F1 10 Tf
+(platform is granted, reviewed and revoked.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(2. Role assignment. Roles are assigned only in the identity system profile table. A role) Tj
+0 -15 Td
+/F1 10 Tf
+(change requires a written request from the tenant owner and approval by two Super Admins) Tj
+0 -15 Td
+/F1 10 Tf
+(\(two-person rule\). Self-approval is not permitted.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(3. Super Admin accounts. The fictional platform keeps no more than four active Super Admin) Tj
+0 -15 Td
+/F1 10 Tf
+(accounts. Each Super Admin account must use hardware-key multi-factor authentication.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 1 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 980 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Platform Access Governance Policy \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(4. Access reviews. Super Admins perform a privileged access review every 90 days. Accounts) Tj
+0 -15 Td
+/F1 10 Tf
+(unused for 45 days are deactivated by setting is_active to false.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(5. Break-glass access. Emergency break-glass credentials are sealed, used only during a) Tj
+0 -15 Td
+/F1 10 Tf
+(declared Severity 1 incident, and rotated within 24 hours of use.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(6. Audit. All role changes are written to an append-only audit log retained for 7 years in) Tj
+0 -15 Td
+/F1 10 Tf
+(this fictional example.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 2 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+9 0 obj
+<< /Title (Finova Demo Bank - Platform Access Governance Policy \(Fictional\)) /Subject (Fictional training example) /Producer (FINOVA sample generator) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000000326 00000 n 
+0000000462 00000 n 
+0000001628 00000 n 
+0000001764 00000 n 
+0000002795 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R /Info 9 0 R >>
+startxref
+2966
+%%EOF

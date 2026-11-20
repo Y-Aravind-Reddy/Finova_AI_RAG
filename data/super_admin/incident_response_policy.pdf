@@ -1,0 +1,122 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 873 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Security Incident Response Policy \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(1. Severity levels. Severity 1: confirmed exposure of customer data or full platform outage.) Tj
+0 -15 Td
+/F1 10 Tf
+(Severity 2: partial outage or suspected data exposure. Severity 3: degraded service with no) Tj
+0 -15 Td
+/F1 10 Tf
+(data risk.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(2. Escalation. A Severity 1 incident must be escalated to the on-call Super Admin within 15) Tj
+0 -15 Td
+/F1 10 Tf
+(minutes and to the fictional Chief Risk Officer within 1 hour.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 1 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 975 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Security Incident Response Policy \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(3. Containment. The incident commander may suspend affected tenants, revoke sessions and) Tj
+0 -15 Td
+/F1 10 Tf
+(disable API keys. Evidence must be preserved before systems are rebuilt.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(4. Post-incident review. A blameless post-incident review is completed within 5 business) Tj
+0 -15 Td
+/F1 10 Tf
+(days for Severity 1 and 2 incidents.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(5. Tenant notification. Affected tenants are notified by the platform team within 24 hours) Tj
+0 -15 Td
+/F1 10 Tf
+(of confirmation in this fictional policy.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 2 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+9 0 obj
+<< /Title (Finova Demo Bank - Security Incident Response Policy \(Fictional\)) /Subject (Fictional training example) /Producer (FINOVA sample generator) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000000326 00000 n 
+0000000462 00000 n 
+0000001386 00000 n 
+0000001522 00000 n 
+0000002548 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R /Info 9 0 R >>
+startxref
+2719
+%%EOF

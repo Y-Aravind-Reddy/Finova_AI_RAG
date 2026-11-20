@@ -1,0 +1,115 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 847 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Customer Verification Procedure \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(1. Verification before disclosure. Before discussing any account, the executive verifies the) Tj
+0 -15 Td
+/F1 10 Tf
+(caller with a one-time passcode sent to the registered mobile number plus two knowledge) Tj
+0 -15 Td
+/F1 10 Tf
+(questions.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(2. Never ask for secrets. Executives must never ask for a full card number, CVV, PIN,) Tj
+0 -15 Td
+/F1 10 Tf
+(password or one-time passcode used for payments.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 1 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 746 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Customer Verification Procedure \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(3. Failed verification. After 3 failed verification attempts the call is ended politely and) Tj
+0 -15 Td
+/F1 10 Tf
+(the account is flagged for review.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(4. Third parties. Information is never disclosed to a third party unless a valid) Tj
+0 -15 Td
+/F1 10 Tf
+(authorisation is recorded on the account.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 2 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+9 0 obj
+<< /Title (Finova Demo Bank - Customer Verification Procedure \(Fictional\)) /Subject (Fictional training example) /Producer (FINOVA sample generator) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000000326 00000 n 
+0000000462 00000 n 
+0000001360 00000 n 
+0000001496 00000 n 
+0000002293 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R /Info 9 0 R >>
+startxref
+2462
+%%EOF

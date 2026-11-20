@@ -1,0 +1,122 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1020 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Credit Risk Assessment Guidelines \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(1. Scope. These fictional guidelines describe how analysts score retail personal loan) Tj
+0 -15 Td
+/F1 10 Tf
+(applications in the demo environment.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(2. Internal score bands. Band A: internal score 750 and above. Band B: 650 to 749. Band C:) Tj
+0 -15 Td
+/F1 10 Tf
+(550 to 649. Band D: below 550. These bands are invented and do not correspond to any credit) Tj
+0 -15 Td
+/F1 10 Tf
+(bureau.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(3. Debt-to-income. The fictional maximum debt-to-income ratio for a Band B applicant is 40) Tj
+0 -15 Td
+/F1 10 Tf
+(percent of verified monthly income.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 1 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 801 >>
+stream
+BT
+50 790 Td
+/F2 13 Tf
+(Finova Demo Bank - Credit Risk Assessment Guidelines \(Fictional\)) Tj
+0 -18 Td
+0 -8 Td
+/F2 9 Tf
+(FICTIONAL TRAINING EXAMPLE - NOT an official bank, RBI or regulatory policy document. All) Tj
+0 -14 Td
+/F2 9 Tf
+(names, figures and procedures are invented for software testing.) Tj
+0 -14 Td
+0 -8 Td
+/F1 10 Tf
+(4. Exceptions. Any approval outside the band rules is an exception and must be signed off by) Tj
+0 -15 Td
+/F1 10 Tf
+(a senior credit analyst with a written rationale.) Tj
+0 -15 Td
+0 -8 Td
+/F1 10 Tf
+(5. Portfolio review. Analysts review the personal loan portfolio monthly and flag any band) Tj
+0 -15 Td
+/F1 10 Tf
+(whose 90-day delinquency exceeds the fictional trigger of 3 percent.) Tj
+0 -15 Td
+0 -8 Td
+/F1 8 Tf
+(Page 2 of 2 - Fictional sample document) Tj
+0 -13 Td
+ET
+endstream
+endobj
+9 0 obj
+<< /Title (Finova Demo Bank - Credit Risk Assessment Guidelines \(Fictional\)) /Subject (Fictional training example) /Producer (FINOVA sample generator) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000000326 00000 n 
+0000000462 00000 n 
+0000001534 00000 n 
+0000001670 00000 n 
+0000002522 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R /Info 9 0 R >>
+startxref
+2693
+%%EOF
