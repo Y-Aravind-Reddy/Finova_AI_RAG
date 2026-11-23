@@ -17,9 +17,11 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import shutil
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,9 +34,19 @@ from pydantic import ValidationError
 from src.config import ConfigurationError, Role, Settings, get_settings
 from src.document_loader import DocumentLoadError, LoadResult, load_role_documents
 from src.embeddings import embedding_model_id, get_embeddings
-from src.rag_pipeline import MANIFEST_FILE, read_manifest, role_index_dir
+from src.rag_pipeline import INGEST_REPORT_FILE, MANIFEST_FILE, read_manifest, role_index_dir
 
 logger = logging.getLogger("ingest")
+
+# Bump when the manifest gains fields the API relies on; forces a one-time rebuild.
+MANIFEST_VERSION = 2
+
+# Provider error messages are stored in the report; scrub anything key/token-like.
+_SECRET_RE = re.compile(r"(AIza[0-9A-Za-z_\-]{20,}|gsk_[0-9A-Za-z]{20,}|eyJ[0-9A-Za-z_\-]+\.[0-9A-Za-z_\-.]+|sk-[0-9A-Za-z]{20,})")
+
+
+def _redact(text: str, limit: int = 300) -> str:
+    return _SECRET_RE.sub("[redacted]", text)[:limit]
 
 
 @dataclass
@@ -47,6 +59,7 @@ class RoleOutcome:
 def source_fingerprint(result: LoadResult, settings: Settings) -> str:
     """Hash of inputs that affect the index; unchanged fingerprint => skip rebuild."""
     digest = hashlib.sha256()
+    digest.update(f"manifest-v{MANIFEST_VERSION}".encode())
     digest.update(embedding_model_id(settings).encode())
     digest.update(f"{settings.chunk_size}:{settings.chunk_overlap}".encode())
     for doc_id, path, tenant in sorted(
@@ -100,6 +113,8 @@ def build_role_index(
             "page_count": result.pages,
             "documents": sorted(set(result.files_loaded)),
             "tenants": sorted({c.metadata["tenant_id"] for c in result.chunks}),
+            "tenant_chunk_counts": dict(sorted(Counter(c.metadata["tenant_id"] for c in result.chunks).items())),
+            "manifest_version": MANIFEST_VERSION,
             "skipped_files": result.errors,
             "fingerprint": fingerprint,
         }
@@ -154,8 +169,25 @@ def run_ingestion(
             outcomes.append(RoleOutcome(role, "built", summary))
         except Exception as exc:  # embedding API / disk errors; keep previous index
             logger.exception("Failed to build index for %s", role.value)
-            outcomes.append(RoleOutcome(role, "failed", f"{type(exc).__name__}: {exc}"))
+            outcomes.append(RoleOutcome(role, "failed", _redact(f"{type(exc).__name__}: {exc}")))
     return outcomes
+
+
+def write_ingest_report(
+    settings: Settings, outcomes: list[RoleOutcome], configuration_error: str | None = None
+) -> None:
+    """Persist the run outcome so SUPER_ADMIN can see *why* indexes are missing
+    via /ingest/status (container logs are otherwise the only record)."""
+    report = {
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "configuration_error": _redact(configuration_error) if configuration_error else None,
+        "roles": {o.role.value: {"status": o.status, "detail": _redact(o.detail)} for o in outcomes},
+    }
+    try:
+        settings.vectorstore_dir.mkdir(parents=True, exist_ok=True)
+        (settings.vectorstore_dir / INGEST_REPORT_FILE).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not write ingest report: %s", exc)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -190,7 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         outcomes = run_ingestion(settings, roles, args.rebuild, args.strict, args.dry_run)
     except ConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
+        if not args.dry_run:
+            write_ingest_report(settings, [], configuration_error=str(exc))
         return 2
+    if not args.dry_run:
+        write_ingest_report(settings, outcomes)
 
     print("\nIngestion summary")
     print("-" * 60)

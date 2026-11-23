@@ -91,6 +91,14 @@ def _looks_like_jwt(token: str) -> bool:
     return len(parts) == 3 and all(parts) and len(token) < 8192
 
 
+def _json_or_unavailable(response: httpx.Response, detail: str) -> object:
+    try:
+        return response.json()
+    except ValueError as exc:  # e.g. an HTML error page from a proxy
+        logger.error("Supabase returned a non-JSON body (status %s)", response.status_code)
+        raise AuthServiceUnavailable(detail) from exc
+
+
 class SupabaseAuthClient:
     """Thin async client for the two Supabase calls the backend needs."""
 
@@ -123,7 +131,7 @@ class SupabaseAuthClient:
             logger.error("Unexpected Supabase auth status %s", response.status_code)
             raise AuthServiceUnavailable("Authentication service error")
 
-        data = response.json()
+        data = _json_or_unavailable(response, "Authentication service error")
         if not isinstance(data, dict) or not data.get("id"):
             raise AuthenticationError("Invalid or expired access token")
         return data
@@ -150,7 +158,7 @@ class SupabaseAuthClient:
         if response.status_code != 200:
             logger.error("Unexpected Supabase profile status %s", response.status_code)
             raise AuthServiceUnavailable("Profile service error")
-        rows = response.json()
+        rows = _json_or_unavailable(response, "Profile service error")
         if not isinstance(rows, list) or not rows:
             return None
         return rows[0]
@@ -216,15 +224,31 @@ async def authenticate_token(token: str, settings: Settings | None = None) -> Au
 
 # --- FastAPI dependencies -----------------------------------------------------
 
-_bearer = HTTPBearer(auto_error=False, description="Supabase access token")
+_bearer = HTTPBearer(
+    auto_error=False,
+    bearerFormat="JWT",
+    description=(
+        "Supabase access token (session.access_token). In Swagger's Authorize "
+        "dialog paste the token only, without the 'Bearer ' prefix."
+    ),
+)
+
+MISSING_TOKEN_DETAIL = (
+    "Missing bearer token. Send 'Authorization: Bearer <supabase_access_token>' "
+    "(in /docs, click Authorize first)."
+)
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> AuthenticatedUser:
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise AuthenticationError("Missing bearer token")
-    return await authenticate_token(credentials.credentials)
+        raise AuthenticationError(MISSING_TOKEN_DETAIL)
+    token = credentials.credentials.strip()
+    # Common Swagger mistake: pasting "Bearer <token>" yields "Bearer Bearer <token>".
+    if token[:7].lower() == "bearer ":
+        token = token[7:].strip()
+    return await authenticate_token(token)
 
 
 def require_roles(allowed: Iterable[Role]) -> Callable[..., object]:

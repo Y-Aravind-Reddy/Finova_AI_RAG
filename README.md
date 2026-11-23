@@ -77,6 +77,8 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored, so never co
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API |
 | `CORS_ORIGIN_REGEX` | Optional anchored regex for changing origins (e.g. AI Studio / Cloud Run previews) |
 | `RETRIEVAL_FETCH_K`, `RETRIEVAL_SCORE_THRESHOLD` | Number of candidates fetched before permission filtering, and the minimum relevance score |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | Bound each LLM call (defaults 45 s, 2 retries). Without them a provider outage hangs `/chat` for minutes |
+| `LLM_FALLBACK_PROVIDER` | Optional (`groq` or `gemini`, must differ from `LLM_PROVIDER`). Tried when the primary LLM fails, e.g. Gemini `503 high demand` |
 
 Invalid combinations stop the app at startup. For example, overlap ≥ chunk size, demo auth in production, or a non-https Supabase URL.
 
@@ -85,38 +87,12 @@ Invalid combinations stop the app at startup. For example, overlap ≥ chunk siz
 ## 4. Supabase setup
 
 1. Create a Supabase project. Copy the project URL, the anon key and the service-role key into `.env`.
-2. In the SQL editor, create the profiles table:
-
-```sql
-create table public.profiles (
-  id          uuid primary key references auth.users (id) on delete cascade,
-  role        text not null check (role in
-                ('SUPER_ADMIN','ADMIN','FINANCE_ANALYST','SUPPORT_EXECUTIVE','CUSTOMER')),
-  is_active   boolean not null default false,
-  tenant_id   text,               -- the bank / organisation the user belongs to
-  created_at  timestamptz not null default now()
-);
-
-alter table public.profiles enable row level security;
-
--- Users may read (not write) their own profile; the frontend may display it.
-create policy "read own profile" on public.profiles
-  for select to authenticated using (auth.uid() = id);
--- Deliberately NO insert/update/delete policies: users can never change their
--- own role. Roles are assigned by admins via the dashboard or service-role tooling.
-```
-
-3. Create users with Supabase Auth, then insert a profile row for each one:
-
-```sql
-insert into public.profiles (id, role, is_active, tenant_id)
-values ('<auth user uuid>', 'CUSTOMER', true, 'bank-1');
-```
+2. The backend reads three columns of `public.profiles` (verified against the live project schema): `role` (enum `user_role_type`: `SUPER_ADMIN`, `ADMIN`, `FINANCE_ANALYST`, `SUPPORT_EXECUTIVE`, `CUSTOMER`), `status` (enum `user_status_type`: `Active`, `Suspended`, `Pending Review`, `KYC Pending`) and `tenant_id` (NOT NULL, FK to `tenant_workspaces.id`). Only `status = 'Active'` may use the API; every other value, a missing value or a missing profile is rejected with 403. Keep RLS enabled and never give users write access to their own `role`, `status` or `tenant_id`.
 
 **How the backend authenticates a request:**
 
 1. It sends the bearer token to `GET /auth/v1/user`. Supabase rejects expired, forged and revoked tokens.
-2. It reads `role`, `is_active` and `tenant_id` from `profiles` with the service-role key, using the **verified** user id.
+2. It reads `role`, `status` and `tenant_id` from `profiles` with the service-role key, using the **verified** user id.
 3. It rejects the request (403) when the user has no profile, is inactive, or has an unknown role.
 
 The backend never reads a role from the request body or headers. `/chat` rejects bodies that contain extra fields such as `role`.
@@ -162,7 +138,7 @@ uvicorn main:app --reload --port 8000
 Open <http://127.0.0.1:8000/docs>.
 
 1. `GET /health` and `GET /roles` need no auth.
-2. Click **Authorize** and paste a Supabase access token. In demo mode, paste `demo:CUSTOMER:bank-1` instead.
+2. Click **Authorize** and paste a Supabase access token (the token only, without `Bearer `). Without this step every protected call returns `401 Missing bearer token`, which is expected. In demo mode, paste `demo:CUSTOMER:bank-1` instead.
 3. Call `POST /chat` with `{"question": "How do I close my account?"}`. The response looks like this:
 
 ```json
@@ -177,7 +153,7 @@ Open <http://127.0.0.1:8000/docs>.
 }
 ```
 
-4. `POST /ingest/status` is limited to SUPER_ADMIN and ADMIN. It is read-only, because ingestion runs offline via the CLI. Filenames and tenant ids are shown only to SUPER_ADMIN.
+4. `POST /ingest/status` is limited to SUPER_ADMIN and ADMIN. It is read-only, because ingestion runs offline via the CLI. SUPER_ADMIN sees filenames, tenant ids, total chunk counts and `last_ingest` (the outcome and error of the last `ingest.py` run). ADMIN sees build state and chunk counts limited to GLOBAL + their own tenant.
 
 To get a real token for testing:
 
@@ -188,7 +164,7 @@ curl -X POST "$SUPABASE_URL/auth/v1/token?grant_type=password" \
 # use the "access_token" field
 ```
 
-Error codes: `401` (missing, invalid or expired token), `403` (inactive user, no profile, or role not allowed), `422` (invalid body), `502` (LLM failure), `503` (index not built, or Supabase/keys not configured).
+Error codes: `401` (missing, invalid or expired token), `403` (inactive user, no profile, or role not allowed), `422` (invalid body), `502` (LLM or embedding provider failure), `503` (index missing/incompatible/corrupted, or Supabase/keys not configured), `500` (unexpected; no stack trace is returned). Every response carries an `X-Request-ID` header that also appears in the server logs.
 
 ### Automated tests
 
@@ -242,7 +218,15 @@ The repo is Railway-ready: `railway.json` (start command + `/health` health chec
 
    Never use demo auth on Railway.
 4. **Settings → Networking → Generate Domain**. You get e.g. `https://finova-rag-production.up.railway.app`.
-5. Check `https://<railway-domain>/health` → `"indexes_built": 5`, and `https://<railway-domain>/docs`.
+5. Check `https://<railway-domain>/health` → `"status": "ok", "indexes_built": 5`, and `https://<railway-domain>/docs`.
+
+### Troubleshooting `"status": "degraded"` / `indexes_built` below 5
+
+`/health` stays HTTP 200 so the service keeps running, but `/chat` returns 503 for every role whose index is missing. To find the cause:
+
+1. Railway → Deployments → **Deploy Logs**: look for the `Ingestion summary` table and the `Config: … gemini_key_set=…` / `Index X NOT ready` lines printed at startup.
+2. Or call `POST /ingest/status` as SUPER_ADMIN and read `last_ingest` (`configuration_error`, per-role `status`/`detail`; secrets are redacted).
+3. Typical causes: `GEMINI_API_KEY` missing or invalid in Railway Variables; `GEMINI_EMBEDDING_MODEL` differs from the one that built the index; a custom Start Command in Railway settings that skips `start.sh`; Gemini quota/rate limits during the startup embedding run.
 
 ### Connecting a Google AI Studio frontend
 

@@ -27,6 +27,8 @@ def get_llm(settings: Settings | None = None, provider: LLMProvider | None = Non
             model=settings.gemini_model,
             google_api_key=api_key,
             temperature=settings.llm_temperature,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         )
 
     if provider == LLMProvider.GROQ:
@@ -37,11 +39,26 @@ def get_llm(settings: Settings | None = None, provider: LLMProvider | None = Non
             model=settings.groq_model,
             api_key=api_key,
             temperature=settings.llm_temperature,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         )
 
     raise ConfigurationError(f"Unsupported LLM_PROVIDER '{provider}'.")
 
 
-def build_rag_chain(llm: BaseChatModel) -> Runnable:
+def get_llm_with_fallback(settings: Settings | None = None) -> Runnable:
+    """Primary LLM, wrapped with LLM_FALLBACK_PROVIDER when one is configured.
+
+    Both providers receive the same grounded prompt, so the fallback cannot
+    widen what documents an answer may draw on.
+    """
+    settings = settings or get_settings()
+    primary = get_llm(settings)
+    if settings.llm_fallback_provider is None:
+        return primary
+    return primary.with_fallbacks([get_llm(settings, settings.llm_fallback_provider)])
+
+
+def build_rag_chain(llm: Runnable) -> Runnable:
     """prompt -> LLM -> plain string. Inputs: see ``prompts.prompt_variables``."""
     return build_rag_prompt() | llm | StrOutputParser()

@@ -7,10 +7,14 @@ Docs: http://127.0.0.1:8000/docs
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+import re
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -18,16 +22,36 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src import __version__
 from src.config import ROLE_DESCRIPTIONS, ConfigurationError, Role, get_settings
 from src.rag_pipeline import (
+    EmbeddingError,
     GenerationError,
+    IndexCorruptedError,
     IndexIncompatibleError,
     IndexNotFoundError,
     RAGPipeline,
     index_status,
+    is_index_ready,
+    read_ingest_report,
+    tenant_visible_chunk_count,
 )
 from src.role_manager import AuthError, AuthenticatedUser, get_current_user, require_roles
 
+# --- Logging with request ids ------------------------------------------------------------
+
+_request_id: ContextVar[str] = ContextVar("request_id", default="-")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
+REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id.get()
+        return True
+
+
 logger = logging.getLogger("finova")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s [%(request_id)s]: %(message)s")
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RequestIdFilter())
 
 
 # --- Schemas -------------------------------------------------------------------------
@@ -77,7 +101,7 @@ class RolesResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: str = Field(..., description="'ok' when every role index is built and usable, otherwise 'degraded'.")
     version: str
     indexes_built: int
     indexes_total: int
@@ -95,13 +119,30 @@ class IndexStatus(BaseModel):
     embedding_model_matches: bool
     built_at: str | None = None
     embedding_model: str | None = None
-    chunk_count: int | None = None
-    documents: list[str] = Field(default_factory=list)
-    tenants: list[str] = Field(default_factory=list)
+    chunk_count: int | None = Field(
+        None,
+        description="SUPER_ADMIN: all chunks. ADMIN: only chunks visible to their tenant (GLOBAL + own tenant).",
+    )
+    documents: list[str] = Field(default_factory=list, description="SUPER_ADMIN only.")
+    tenants: list[str] = Field(default_factory=list, description="SUPER_ADMIN only.")
+
+
+class IngestRoleOutcome(BaseModel):
+    status: str
+    detail: str = ""
+
+
+class IngestReport(BaseModel):
+    finished_at: str | None = None
+    configuration_error: str | None = None
+    roles: dict[str, IngestRoleOutcome] = Field(default_factory=dict)
 
 
 class IngestStatusResponse(BaseModel):
     indexes: list[IndexStatus]
+    last_ingest: IngestReport | None = Field(
+        None, description="Outcome of the last `python ingest.py` run (SUPER_ADMIN only)."
+    )
     note: str = "Indexes are built offline with `python ingest.py`; this endpoint is read-only."
 
 
@@ -116,8 +157,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()  # raises on invalid configuration -> server refuses to start
     if settings.demo_auth_enabled:
         logger.warning("DEMO AUTHENTICATION IS ENABLED. Never use this outside local development.")
+    # Startup diagnostics: presence flags only, never values.
+    logger.info(
+        "Config: app_env=%s auth_mode=%s llm_provider=%s llm_fallback=%s gemini_key_set=%s groq_key_set=%s supabase_configured=%s",
+        settings.app_env.value,
+        settings.auth_mode.value,
+        settings.llm_provider.value,
+        settings.llm_fallback_provider.value if settings.llm_fallback_provider else "none",
+        settings.gemini_api_key is not None,
+        settings.groq_api_key is not None,
+        bool(settings.supabase_url and settings.supabase_anon_key and settings.supabase_service_role_key),
+    )
+    for role in Role:
+        status = index_status(role, settings)
+        if is_index_ready(status):
+            logger.info("Index %s ready (%s chunks)", role.value, status["chunk_count"])
+        else:
+            logger.error(
+                "Index %s NOT ready (built=%s, embedding_model_matches=%s). /chat for this role returns 503. "
+                "See /ingest/status (SUPER_ADMIN) or the ingest logs above.",
+                role.value, status["index_built"], status["embedding_model_matches"],
+            )
     app.state.pipeline = RAGPipeline(settings)
     yield
+    logger.info("Shutting down")
 
 
 settings_at_import = get_settings()
@@ -133,13 +196,36 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    """Attach a request id to logs and the response (reuses a sane incoming id)."""
+    incoming = request.headers.get(REQUEST_ID_HEADER) or request.headers.get("X-Railway-Request-Id") or ""
+    request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex
+    token = _request_id.set(request_id)
+    try:
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Handled here (not only in the Exception handler) so the log line and
+            # the 500 response both carry the request id.
+            logger.exception("Unhandled error")
+            response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
+        response.headers[REQUEST_ID_HEADER] = request_id
+        return response
+    finally:
+        _request_id.reset(token)
+
+
+# Added after the request-id middleware so CORS is the outer layer and also
+# decorates the 500 responses produced above.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings_at_import.cors_origin_list,
     allow_origin_regex=settings_at_import.cors_origin_regex,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", REQUEST_ID_HEADER],
+    expose_headers=[REQUEST_ID_HEADER],
 )
 
 
@@ -157,6 +243,7 @@ async def _auth_error(_: Request, exc: AuthError) -> JSONResponse:
 
 @app.exception_handler(IndexNotFoundError)
 @app.exception_handler(IndexIncompatibleError)
+@app.exception_handler(IndexCorruptedError)
 async def _index_error(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Index error: %s", exc)
     return JSONResponse(status_code=503, content={"detail": "The policy index for your role is not available. Please contact an administrator."})
@@ -171,6 +258,11 @@ async def _config_error(_: Request, exc: ConfigurationError) -> JSONResponse:
 @app.exception_handler(GenerationError)
 async def _generation_error(_: Request, exc: GenerationError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": "The language model is temporarily unavailable."})
+
+
+@app.exception_handler(EmbeddingError)
+async def _embedding_error(_: Request, exc: EmbeddingError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": "The embedding service is temporarily unavailable."})
 
 
 @app.exception_handler(Exception)
@@ -190,9 +282,18 @@ _ERRORS = {
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health(pipeline: RAGPipeline = Depends(get_pipeline)) -> HealthResponse:
-    """Liveness check. Does not call external services or reveal configuration."""
-    built = sum(1 for role in Role if index_status(role, pipeline.settings)["index_built"])
-    return HealthResponse(status="ok", version=__version__, indexes_built=built, indexes_total=len(Role))
+    """Liveness check. Does not call external services or reveal configuration.
+
+    Always HTTP 200 while the process is up (so Railway keeps it running and
+    /ingest/status stays reachable for diagnosis); ``status`` is ``degraded``
+    when any role index is missing or built with a different embedding model.
+    """
+    statuses = [index_status(role, pipeline.settings) for role in Role]
+    built = sum(1 for s in statuses if s["index_built"])
+    ready = all(is_index_ready(s) for s in statuses)
+    return HealthResponse(
+        status="ok" if ready else "degraded", version=__version__, indexes_built=built, indexes_total=len(Role)
+    )
 
 
 @app.get("/roles", response_model=RolesResponse, tags=["system"])
@@ -201,7 +302,12 @@ async def roles() -> RolesResponse:
     return RolesResponse(roles=[RoleInfo(role=r, description=ROLE_DESCRIPTIONS[r]) for r in Role])
 
 
-@app.post("/chat", response_model=ChatResponse, tags=["rag"], responses={**_ERRORS, 502: {"model": ErrorResponse}})
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["rag"],
+    responses={**_ERRORS, 502: {"model": ErrorResponse, "description": "LLM or embedding provider failure"}},
+)
 async def chat(
     body: ChatRequest,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -234,15 +340,23 @@ async def ingest_status(
 ) -> IngestStatusResponse:
     """Report the state of each role index. Restricted to SUPER_ADMIN and ADMIN.
 
-    Document filenames and tenant ids span all tenants, so they are only shown
-    to SUPER_ADMIN; a (tenant-level) ADMIN sees counts and build state only.
+    Read-only: never builds, modifies or uploads anything.
+
+    * SUPER_ADMIN: full metadata (filenames, tenant ids, total chunk counts) and
+      the outcome of the last ingestion run.
+    * ADMIN (tenant-level): build state plus chunk counts limited to GLOBAL and
+      their own tenant; no filenames, tenant ids or other tenants' counts.
     """
-    selected = (body.roles if body and body.roles else None) or list(Role)
+    is_super = user.role == Role.SUPER_ADMIN
+    selected = list(dict.fromkeys(body.roles)) if body and body.roles else list(Role)
     statuses = []
     for role in selected:
-        status = index_status(role, pipeline.settings)
-        if user.role != Role.SUPER_ADMIN:
+        status: dict[str, Any] = index_status(role, pipeline.settings)
+        if not is_super:
             status["documents"] = []
             status["tenants"] = []
+            status["chunk_count"] = tenant_visible_chunk_count(status, user.tenant_id) if status["index_built"] else None
+        status.pop("tenant_chunk_counts", None)
         statuses.append(IndexStatus(**status))
-    return IngestStatusResponse(indexes=statuses)
+    report = read_ingest_report(pipeline.settings) if is_super else None
+    return IngestStatusResponse(indexes=statuses, last_ingest=IngestReport(**report) if report else None)

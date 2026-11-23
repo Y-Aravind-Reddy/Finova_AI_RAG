@@ -30,9 +30,9 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import Runnable
 
-from src.chains import build_rag_chain, get_llm
+from src.chains import build_rag_chain, get_llm_with_fallback
 from src.config import GLOBAL_TENANT_ID, Role, Settings, get_settings
 from src.embeddings import embedding_model_id, get_embeddings
 from src.prompts import NOT_FOUND_MESSAGE, NOT_FOUND_SENTINEL, detect_injection, prompt_variables
@@ -41,6 +41,8 @@ from src.role_manager import AuthenticatedUser
 logger = logging.getLogger(__name__)
 
 MANIFEST_FILE = "manifest.json"
+# Written by ``ingest.py`` next to the role folders; records why the last run failed.
+INGEST_REPORT_FILE = "ingest_report.json"
 # Matches inline citations such as "[policy.pdf, p. 2]" or "[source=policy.pdf, p. 2]".
 _CITATION_RE = re.compile(r"([\w.\-]+\.pdf)\s*,?\s*p(?:age)?\.?\s*(\d+)", re.IGNORECASE)
 INDEX_FILES = ("index.faiss", "index.pkl")
@@ -56,6 +58,14 @@ class IndexNotFoundError(RAGError):
 
 class IndexIncompatibleError(RAGError):
     """The index was built with a different embedding model than is configured."""
+
+
+class IndexCorruptedError(RAGError):
+    """The index files exist but cannot be loaded."""
+
+
+class EmbeddingError(RAGError):
+    """The embedding provider failed to embed the question."""
 
 
 class GenerationError(RAGError):
@@ -114,7 +124,40 @@ def index_status(role: Role, settings: Settings | None = None) -> dict[str, Any]
         "chunk_count": manifest.get("chunk_count") if manifest else None,
         "documents": manifest.get("documents", []) if manifest else [],
         "tenants": manifest.get("tenants", []) if manifest else [],
+        "tenant_chunk_counts": manifest.get("tenant_chunk_counts") if manifest else None,
     }
+
+
+def is_index_ready(status: dict[str, Any]) -> bool:
+    return bool(status["index_built"] and status["embedding_model_matches"])
+
+
+def tenant_visible_chunk_count(status: dict[str, Any], tenant_id: str | None) -> int | None:
+    """Chunks a user of ``tenant_id`` could retrieve (GLOBAL + own tenant).
+
+    Returns None for indexes built before per-tenant counts were recorded, rather
+    than falling back to the all-tenant total.
+    """
+    counts = status.get("tenant_chunk_counts")
+    if not isinstance(counts, dict):
+        return None
+    total = int(counts.get(GLOBAL_TENANT_ID, 0))
+    if tenant_id and tenant_id != GLOBAL_TENANT_ID:
+        total += int(counts.get(tenant_id, 0))
+    return total
+
+
+def read_ingest_report(settings: Settings | None = None) -> dict[str, Any] | None:
+    settings = settings or get_settings()
+    path = settings.vectorstore_dir / INGEST_REPORT_FILE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Unreadable ingest report %s: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # --- Permission checks ------------------------------------------------------------
@@ -149,7 +192,7 @@ class RAGPipeline:
         self,
         settings: Settings | None = None,
         embeddings: Embeddings | None = None,
-        llm: BaseChatModel | None = None,
+        llm: Runnable | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._embeddings = embeddings
@@ -164,9 +207,9 @@ class RAGPipeline:
         return self._embeddings
 
     @property
-    def llm(self) -> BaseChatModel:
+    def llm(self) -> Runnable:
         if self._llm is None:
-            self._llm = get_llm(self.settings)
+            self._llm = get_llm_with_fallback(self.settings)
         return self._llm
 
     def load_store(self, role: Role) -> FAISS:
@@ -184,30 +227,47 @@ class RAGPipeline:
                 f"{expected} is configured. Rebuild with `python ingest.py --rebuild`."
             )
         version = str(manifest.get("built_at"))
+        embeddings = self.embeddings  # may raise ConfigurationError (-> 503), not "corrupted"
         with self._lock:
             cached = self._stores.get(role)
             if cached and cached[0] == version:
                 return cached[1]
             # allow_dangerous_deserialization: the docstore is a pickle. Only
             # indexes produced by ingest.py into a protected directory may be loaded.
-            store = FAISS.load_local(
-                str(index_dir),
-                self.embeddings,
-                allow_dangerous_deserialization=True,
-                normalize_L2=True,
-                distance_strategy=DistanceStrategy.EUCLIDEAN_DISTANCE,
-            )
+            try:
+                store = FAISS.load_local(
+                    str(index_dir),
+                    embeddings,
+                    allow_dangerous_deserialization=True,
+                    normalize_L2=True,
+                    distance_strategy=DistanceStrategy.EUCLIDEAN_DISTANCE,
+                )
+            except Exception as exc:  # faiss/pickle raise many types on damaged files
+                logger.error("Failed to load %s index: %s", role.value, type(exc).__name__)
+                raise IndexCorruptedError(
+                    f"The {role.value} index could not be loaded. Rebuild with `python ingest.py --rebuild`."
+                ) from exc
             self._stores[role] = (version, store)
             return store
+
+    def embed_question(self, question: str) -> list[float]:
+        embeddings = self.embeddings  # ConfigurationError propagates unchanged
+        try:
+            return embeddings.embed_query(question)
+        except Exception as exc:  # provider SDKs raise many exception types
+            logger.error("Question embedding failed: %s", type(exc).__name__)
+            raise EmbeddingError("The embedding provider request failed") from exc
 
     def retrieve(self, question: str, user: AuthenticatedUser) -> list[tuple[Document, float]]:
         """Top-k permitted chunks for ``user`` with relevance scores, best first."""
         k = self.settings.retrieval_top_k
+        # Load every permitted index first so a missing index fails before any API call.
+        stores = [self.load_store(role) for role in user.accessible_roles]
+        vector = self.embed_question(question)
         results: list[tuple[Document, float]] = []
-        for role in user.accessible_roles:
-            store = self.load_store(role)
-            hits = store.similarity_search_with_score(
-                question,
+        for store in stores:
+            hits = store.similarity_search_with_score_by_vector(
+                vector,
                 k=k,
                 fetch_k=self.settings.retrieval_fetch_k,
                 filter=lambda meta: is_document_permitted(meta, user),

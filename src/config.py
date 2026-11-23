@@ -97,8 +97,14 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_model: str = "openai/gpt-oss-120b"
     llm_provider: LLMProvider = LLMProvider.GEMINI
+    # Optional second provider tried when the primary fails (e.g. Gemini 503 overload).
+    llm_fallback_provider: LLMProvider | None = None
     embedding_provider: EmbeddingProvider = EmbeddingProvider.GEMINI
     llm_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Provider SDK defaults are "no timeout" and up to 6 retries, which can hang
+    # /chat for minutes; bound them so failures surface quickly as HTTP 502.
+    llm_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
+    llm_max_retries: int = Field(default=2, ge=0, le=6)
 
     # --- Supabase ------------------------------------------------------------
     supabase_url: str | None = None
@@ -165,10 +171,13 @@ class Settings(BaseSettings):
             return value or None
         return value
 
-    @field_validator("llm_provider", "embedding_provider", "auth_mode", "app_env", mode="before")
+    @field_validator("llm_provider", "llm_fallback_provider", "embedding_provider", "auth_mode", "app_env", mode="before")
     @classmethod
     def _lowercase_enum(cls, value: object) -> object:
-        return value.strip().lower() if isinstance(value, str) else value
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return value or None  # blank optional value means "not set"
+        return value
 
     @field_validator("supabase_profiles_table")
     @classmethod
@@ -182,6 +191,8 @@ class Settings(BaseSettings):
     def _validate_combinations(self) -> "Settings":
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
+        if self.llm_fallback_provider == self.llm_provider:
+            raise ValueError("LLM_FALLBACK_PROVIDER must differ from LLM_PROVIDER (or be left blank)")
         if self.retrieval_fetch_k < self.retrieval_top_k:
             raise ValueError("RETRIEVAL_FETCH_K must be >= RETRIEVAL_TOP_K")
         if self.supabase_url and urlparse(self.supabase_url).path not in ("", "/"):
