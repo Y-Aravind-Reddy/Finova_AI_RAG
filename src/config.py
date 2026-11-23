@@ -10,6 +10,7 @@ need a key (e.g. ``/health``) still work while the operator is setting up.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -183,6 +184,8 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         if self.retrieval_fetch_k < self.retrieval_top_k:
             raise ValueError("RETRIEVAL_FETCH_K must be >= RETRIEVAL_TOP_K")
+        if self.supabase_url and urlparse(self.supabase_url).path not in ("", "/"):
+            raise ValueError("SUPABASE_URL must be the project base URL only (e.g. https://<ref>.supabase.co), without /rest/v1 or other paths")
         if self.supabase_url and not self.supabase_url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
             raise ValueError("SUPABASE_URL must use https (http is only allowed for localhost)")
         if self.auth_mode == AuthMode.DEMO:

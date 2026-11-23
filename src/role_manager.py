@@ -4,7 +4,7 @@ Trust model:
 * The frontend sends ONLY the Supabase access token (``Authorization: Bearer``).
 * The backend validates the token with Supabase Auth (``GET /auth/v1/user``),
   which rejects expired, malformed, revoked and forged tokens.
-* The role, active flag and tenant are read from the ``profiles`` table using
+* The role, status and tenant are read from the ``profiles`` table using
   the verified user id. Any role/tenant sent by the client is ignored.
 """
 
@@ -80,6 +80,12 @@ def parse_role(value: object) -> Role:
         raise AuthorizationError("User profile role is not recognised") from exc
 
 
+def is_profile_active(profile: dict) -> bool:
+    """Fail closed: only an explicit ``status`` of "active" (any case) is accepted."""
+    status = profile.get("status")
+    return isinstance(status, str) and status.strip().lower() == "active"
+
+
 def _looks_like_jwt(token: str) -> bool:
     parts = token.split(".")
     return len(parts) == 3 and all(parts) and len(token) < 8192
@@ -123,14 +129,14 @@ class SupabaseAuthClient:
         return data
 
     async def get_profile(self, user_id: str) -> dict | None:
-        """Fetch role/is_active/tenant_id for ``user_id`` using the service role key."""
+        """Fetch role/status/tenant_id for ``user_id`` using the service role key."""
         url, _, service_key = self._settings.require_supabase()
         table = self._settings.supabase_profiles_table
         try:
             async with self._client() as client:
                 response = await client.get(
                     f"{url}/rest/v1/{table}",
-                    params={"id": f"eq.{user_id}", "select": "role,is_active,tenant_id", "limit": "1"},
+                    params={"id": f"eq.{user_id}", "select": "role,status,tenant_id", "limit": "1"},
                     headers={
                         "apikey": service_key,
                         "Authorization": f"Bearer {service_key}",
@@ -167,7 +173,7 @@ async def authenticate_supabase(
     profile = await client.get_profile(user_id)
     if profile is None:
         raise AuthorizationError("No profile found for this user")
-    if profile.get("is_active") is not True:
+    if not is_profile_active(profile):
         raise AuthorizationError("User account is inactive")
 
     role = parse_role(profile.get("role"))

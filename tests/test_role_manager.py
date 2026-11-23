@@ -56,7 +56,7 @@ def run(coro: Any) -> Any:
 
 def test_valid_token_returns_role_from_profile() -> None:
     seen: list[httpx.Request] = []
-    client = mock_client(profile=[{"role": "finance_analyst", "is_active": True, "tenant_id": "bank-1"}], seen=seen)
+    client = mock_client(profile=[{"role": "finance_analyst", "status": "Active", "tenant_id": "bank-1"}], seen=seen)
     user = run(authenticate_supabase(TOKEN, supabase_settings(), client))
     assert user.role == Role.FINANCE_ANALYST
     assert user.tenant_id == "bank-1" and user.user_id == USER_ID
@@ -78,12 +78,12 @@ def test_malformed_token_rejected_without_network() -> None:
 
 
 def test_inactive_user_rejected() -> None:
-    client = mock_client(profile=[{"role": "ADMIN", "is_active": False, "tenant_id": "t"}])
+    client = mock_client(profile=[{"role": "ADMIN", "status": "Inactive", "tenant_id": "t"}])
     with pytest.raises(AuthorizationError, match="inactive"):
         run(authenticate_supabase(TOKEN, supabase_settings(), client))
 
 
-def test_missing_is_active_treated_as_inactive() -> None:
+def test_missing_status_treated_as_inactive() -> None:
     client = mock_client(profile=[{"role": "ADMIN", "tenant_id": "t"}])
     with pytest.raises(AuthorizationError):
         run(authenticate_supabase(TOKEN, supabase_settings(), client))
@@ -95,7 +95,7 @@ def test_missing_profile_rejected() -> None:
 
 
 def test_unknown_role_rejected() -> None:
-    client = mock_client(profile=[{"role": "AUDITOR", "is_active": True}])
+    client = mock_client(profile=[{"role": "AUDITOR", "status": "Active"}])
     with pytest.raises(AuthorizationError):
         run(authenticate_supabase(TOKEN, supabase_settings(), client))
 
@@ -125,3 +125,10 @@ def test_demo_tokens_only_when_enabled() -> None:
     # In supabase mode a demo-looking token is just an invalid JWT.
     with pytest.raises(AuthenticationError):
         run(authenticate_token("demo:SUPER_ADMIN", supabase_settings()))
+
+
+@pytest.mark.parametrize("status", ["Inactive", "suspended", "", None, True, "active-pending"])
+def test_non_active_status_rejected(status: object) -> None:
+    client = mock_client(profile=[{"role": "CUSTOMER", "status": status, "tenant_id": "t"}])
+    with pytest.raises(AuthorizationError, match="inactive"):
+        run(authenticate_supabase(TOKEN, supabase_settings(), client))
