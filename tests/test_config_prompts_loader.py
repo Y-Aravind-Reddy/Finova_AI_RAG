@@ -58,6 +58,12 @@ def test_insecure_supabase_url_rejected() -> None:
         make_settings(supabase_url="http://example.supabase.co")
 
 
+@pytest.mark.parametrize("url", ["https://example.supabase.co/rest/v1", "https://example.supabase.co/auth/v1/"])
+def test_supabase_url_with_path_rejected(url: str) -> None:
+    with pytest.raises(ValidationError, match="base URL"):
+        make_settings(supabase_url=url)
+
+
 def test_unknown_llm_provider_rejected() -> None:
     with pytest.raises(ValidationError):
         make_settings(llm_provider="openai")

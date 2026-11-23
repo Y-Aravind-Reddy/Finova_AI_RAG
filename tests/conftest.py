@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT))
 os.environ["APP_ENV"] = "test"
 os.environ["AUTH_MODE"] = "supabase"
 os.environ["ALLOW_DEMO_AUTH"] = "false"
+# OS env vars override .env, and blank values become None: tests never reach a real Supabase project.
+for _name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"):
+    os.environ[_name] = ""
 
 from langchain_core.embeddings import Embeddings  # noqa: E402
 from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402
