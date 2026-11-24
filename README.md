@@ -1,6 +1,6 @@
 # FINOVA Role-Based Banking Policy RAG Backend
 
-A FastAPI backend that answers banking-policy questions using only the documents a user's **backend-verified role** (and tenant) is permitted to see. It uses LangChain, Gemini embeddings, FAISS, and either Gemini or Groq as the LLM. Supabase Auth handles authentication and a `profiles` table stores each user's role.
+A FastAPI backend that answers banking-policy questions using only the documents a user's **backend-verified role** (and tenant) is permitted to see. It uses LangChain, Gemini embeddings, and either Gemini or Groq as the LLM. **Supabase** does everything else: Auth verifies users, the `profiles` table stores each user's role and tenant, and the `policy_chunks` / `policy_indexes` tables (pgvector) store the document chunks and their embeddings. There is no local index folder.
 
 > **The ten sample PDFs in `data/` are fictional training examples.** They describe an invented "Finova Demo Bank". They are **not** official bank, RBI or regulatory policy, and every figure in them is made up.
 
@@ -13,28 +13,29 @@ A FastAPI backend that answers banking-policy questions using only the documents
 ```
 FINOVA_ROLE_BASED_RAG/
 ├── data/<role>/                 PDFs per role (sub-folder <tenant_id>/ = tenant-specific docs)
-├── vectorstore/<role>/          FAISS index + manifest.json per role (built by ingest.py)
+├── supabase/migrations/         SQL for the policy_chunks / policy_indexes tables + search functions
 ├── src/
 │   ├── config.py                settings + validation (pydantic-settings)
 │   ├── prompts.py               secure role-aware prompt, injection defences
 │   ├── embeddings.py            Gemini embeddings
 │   ├── chains.py                Gemini / Groq LLM selection, chain construction
 │   ├── rag_pipeline.py          role/tenant-filtered retrieval + grounded answers
+│   ├── vector_store.py          Supabase (pgvector) client for policy chunks
 │   ├── role_manager.py          Supabase token validation, role authorization
 │   └── document_loader.py       PDF extraction + chunking + access metadata
 ├── scripts/generate_sample_pdfs.py   regenerates the 10 fictional sample PDFs
 ├── tests/                       offline unit/integration tests (no API keys needed)
-├── ingest.py                    builds one FAISS index per role
+├── ingest.py                    embeds data/ PDFs into Supabase, per role
 └── main.py                      FastAPI app
 ```
 
-Roles: `SUPER_ADMIN`, `ADMIN`, `FINANCE_ANALYST`, `SUPPORT_EXECUTIVE`, `CUSTOMER`. Each role searches **only its own index**. SUPER_ADMIN cannot read other roles' documents either. If you want role inheritance, change `ROLE_INDEX_ACCESS` in `src/role_manager.py` deliberately, as a reviewed policy decision.
+Roles: `SUPER_ADMIN`, `ADMIN`, `FINANCE_ANALYST`, `SUPPORT_EXECUTIVE`, `CUSTOMER`. Each role searches **only its own chunks**. SUPER_ADMIN cannot read other roles' documents either. If you want role inheritance, change `ROLE_INDEX_ACCESS` in `src/role_manager.py` deliberately, as a reviewed policy decision.
 
 ---
 
 ## 1. Python setup
 
-Python **3.11+** is required. The project was tested on Python 3.13. Very new interpreters (for example 3.15) may not have `faiss-cpu` wheels yet.
+Python **3.11+** is required. The project was tested on Python 3.13.
 
 ```bash
 cd FINOVA_ROLE_BASED_RAG
@@ -73,20 +74,21 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored, so never co
 | `AUTH_MODE` | `supabase` (default) or `demo` |
 | `ALLOW_DEMO_AUTH` | Must be `true` **and** `APP_ENV` must not be `production` before `AUTH_MODE=demo` is accepted |
 | `APP_ENV` | `production` (default), `development` or `test` |
-| `VECTORSTORE_PATH` | Index root folder (default `vectorstore`) |
+| `EMBEDDING_DIMENSIONS` | Embedding size (default `3072`, Gemini's default). Must match `vector(N)` in the Supabase migration |
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API |
 | `CORS_ORIGIN_REGEX` | Optional anchored regex for changing origins (e.g. AI Studio / Cloud Run previews) |
-| `RETRIEVAL_FETCH_K`, `RETRIEVAL_SCORE_THRESHOLD` | Number of candidates fetched before permission filtering, and the minimum relevance score |
+| `RETRIEVAL_SCORE_THRESHOLD` | Minimum cosine relevance (0–1) for a chunk to be used; 0 disables |
 | `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | Bound each LLM call (defaults 45 s, 2 retries). Without them a provider outage hangs `/chat` for minutes |
 | `LLM_FALLBACK_PROVIDER` | Optional (`groq` or `gemini`, must differ from `LLM_PROVIDER`). Tried when the primary LLM fails, e.g. Gemini `503 high demand` |
 
 Invalid combinations stop the app at startup. For example, overlap ≥ chunk size, demo auth in production, or a non-https Supabase URL.
 
-**Changing `GEMINI_EMBEDDING_MODEL` requires `python ingest.py --rebuild`.** Each index records the model it was built with, and the API refuses to query a mismatched index.
+**Changing `GEMINI_EMBEDDING_MODEL` requires `python ingest.py --rebuild`.** Each role's `policy_indexes` row records the model it was built with, and the API (and the SQL search function) refuse to query a mismatched index.
 
 ## 4. Supabase setup
 
 1. Create a Supabase project. Copy the project URL, the anon key and the service-role key into `.env`.
+1. **Run the migration once:** open Supabase → **SQL Editor**, paste the contents of `supabase/migrations/20261124000000_policy_vector_store.sql` and click **Run**. It enables `pgvector` and creates `policy_indexes`, `policy_chunks`, `match_policy_chunks()` and `activate_policy_build()`. It changes nothing that already exists and is safe to re-run. Both tables have RLS on with no policies, and anon/authenticated access is revoked, so only the backend's service-role key can read policy text.
 2. The backend reads three columns of `public.profiles` (verified against the live project schema): `role` (enum `user_role_type`: `SUPER_ADMIN`, `ADMIN`, `FINANCE_ANALYST`, `SUPPORT_EXECUTIVE`, `CUSTOMER`), `status` (enum `user_status_type`: `Active`, `Suspended`, `Pending Review`, `KYC Pending`) and `tenant_id` (NOT NULL, FK to `tenant_workspaces.id`). Only `status = 'Active'` may use the API; every other value, a missing value or a missing profile is rejected with 403. Keep RLS enabled and never give users write access to their own `role`, `status` or `tenant_id`.
 
 **How the backend authenticates a request:**
@@ -125,7 +127,9 @@ python ingest.py --role CUSTOMER      # one role (repeatable)
 python ingest.py --dry-run            # load + chunk only, no API calls
 ```
 
-Each role builds into a temporary folder that is swapped in only after it saves successfully, so a failed run keeps the previous index. A role whose source PDFs, chunk settings and embedding model are unchanged is skipped. Exit codes: `0` success, `1` at least one role failed, `2` configuration error (for example a missing `GEMINI_API_KEY`).
+Ingestion needs `GEMINI_API_KEY`, `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (except `--dry-run`). Each role's chunks are inserted under a new build id; `activate_policy_build()` then switches the role to that build and deletes the old one in a single transaction. A failed run keeps the previous build live and removes its own partial rows. A role whose source PDFs, chunk settings and embedding model are unchanged is skipped, with no embedding calls. Each role's outcome is saved in `policy_indexes.last_run_*`. Exit codes: `0` success, `1` at least one role failed, `2` configuration or Supabase error (for example a missing `GEMINI_API_KEY`, or the migration not applied).
+
+You can run ingestion from your machine: it writes to the same Supabase project the deployed API reads, so new documents are live without a redeploy.
 
 ## 7. Start FastAPI
 
@@ -201,7 +205,7 @@ The frontend only ever needs the **anon** key. Never ship the service-role key t
 
 The repo is Railway-ready: `railway.json` (start command + `/health` health check), `start.sh`, `.python-version` (3.13) and `requirements.txt`.
 
-**What happens on each deploy:** `start.sh` runs `python ingest.py` (embeds `data/` with Gemini), then starts uvicorn on Railway's `$PORT`. Container disks are ephemeral, so indexes are rebuilt on every deploy/restart — cheap for the samples. For larger document sets, add a **Railway Volume** mounted at `/data` and set `VECTORSTORE_PATH=/data/vectorstore`; unchanged indexes are then skipped.
+**What happens on each deploy:** `start.sh` runs `python ingest.py`, which compares `data/` with what is stored in Supabase and embeds only roles whose PDFs changed (normally none), then starts uvicorn on Railway's `$PORT`. The indexes live in Supabase, so Railway's temporary disk does not matter and no volume is needed.
 
 1. Push the project to GitHub (`.env` and `.venv` are git-ignored — never commit them). If the repo root is the parent folder, set **Settings → Root Directory** to `FINOVA_ROLE_BASED_RAG`.
 2. Railway → **New Project → Deploy from GitHub repo**.
@@ -225,8 +229,8 @@ The repo is Railway-ready: `railway.json` (start command + `/health` health chec
 `/health` stays HTTP 200 so the service keeps running, but `/chat` returns 503 for every role whose index is missing. To find the cause:
 
 1. Railway → Deployments → **Deploy Logs**: look for the `Ingestion summary` table and the `Config: … gemini_key_set=…` / `Index X NOT ready` lines printed at startup.
-2. Or call `POST /ingest/status` as SUPER_ADMIN and read `last_ingest` (`configuration_error`, per-role `status`/`detail`; secrets are redacted).
-3. Typical causes: `GEMINI_API_KEY` missing or invalid in Railway Variables; `GEMINI_EMBEDDING_MODEL` differs from the one that built the index; a custom Start Command in Railway settings that skips `start.sh`; Gemini quota/rate limits during the startup embedding run.
+2. Or call `POST /ingest/status` as SUPER_ADMIN and read `last_ingest` (per-role `status`/`detail` from the last run; secrets are redacted). A configuration error that stopped ingestion before it reached Supabase appears only in the deploy logs.
+3. Typical causes: the Supabase migration has not been run (logs say `apply supabase/migrations/…`); `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` missing in Railway Variables; `GEMINI_API_KEY` missing or invalid; `GEMINI_EMBEDDING_MODEL` differs from the one that built the index; Gemini quota/rate limits during ingestion. Running `python ingest.py` locally against the same Supabase project fixes missing indexes without a redeploy.
 
 ### Connecting a Google AI Studio frontend
 
@@ -251,21 +255,20 @@ Find your frontend's exact origin (browser devtools → Network → `Origin` req
 
 The project is **not production-ready** until the items below are addressed.
 
-1. **Tenant isolation is logical, not physical.** All tenants' documents for a role share one FAISS index. Isolation comes from `tenant_id` and `allowed_roles` metadata, which is checked inside the FAISS search filter and again after retrieval. A user with no `tenant_id` sees only `GLOBAL` documents. This prevents cross-tenant results from reaching the API, but:
-   * an operator or anyone with file access can read every tenant's chunks in `vectorstore/`;
-   * filtering happens after the nearest-neighbour search (`RETRIEVAL_FETCH_K` candidates), so a tenant with few documents in a large shared index may get fewer results;
-   * removing one tenant's data means rebuilding the role index.
+1. **Tenant isolation is enforced in SQL, but all tenants share one table.** `match_policy_chunks()` only returns rows whose `role_scope`/`allowed_roles` match the verified role and whose `tenant_id` is `GLOBAL` or the user's own tenant; the API then re-checks every row. A user with no `tenant_id` sees only `GLOBAL` documents. Remaining caveats:
+   * anyone holding the service-role key (or database access) can read every tenant's chunks;
+   * removing one tenant's data means re-running ingestion for that role;
+   * search is an exact scan of one role's rows — fine for thousands of chunks; beyond ~100k per role add an HNSW index (see the migration comment).
 
-   For production, use a separate index per (role, tenant) or a vector database with native tenant partitioning and row-level security (for example pgvector with RLS). Also add audit logging.
+   Also add audit logging.
 2. **Do not ingest individual customers' confidential data** into these indexes. The `CUSTOMER` role is one shared scope per tenant, and there is no per-end-customer document isolation.
-3. **FAISS docstores are pickle files.** `load_local` runs with `allow_dangerous_deserialization=True`. Only load indexes produced by `ingest.py`, and keep `vectorstore/` writable only by the deployment user.
+3. **Keep RLS on the policy tables.** They hold the full text of every policy document. Do not add RLS policies that expose them to `anon` or `authenticated`; the frontend never needs them.
 4. **Prompt injection is mitigated, not eliminated.** The mitigations are: delimited and sanitised context, a system prompt that treats documents as untrusted data, heuristic flagging (`context_warning`), and citations taken from metadata rather than model output. A malicious document can still influence an answer, so control who can add PDFs.
-5. **No rate limiting, request quotas or response caching.** Add these at an API gateway or with middleware. Every `/chat` request makes two Supabase calls, one embedding call and one LLM call.
+5. **No rate limiting, request quotas or response caching.** Add these at an API gateway or with middleware. Every `/chat` request makes three or four Supabase calls (auth, profile, search, plus the per-role index state every 30 s), one embedding call and one LLM call.
 6. **Answers can still be wrong.** LLM output is not legal or regulatory advice. Grounding reduces hallucination but does not eliminate it.
-7. **The service-role key bypasses RLS.** The backend uses it only for a single filtered `profiles` lookup. Store it in a secret manager in production.
-8. `langchain-community` (which provides the FAISS wrapper) prints a deprecation notice. Plan a move to a maintained vector-store integration.
+7. **The service-role key bypasses RLS.** The backend uses it for the filtered `profiles` lookup and the policy tables. Store it in a secret manager in production.
 
 ## What has and has not been verified
 
-* ✅ Offline: the test suite passes, ingestion builds all five indexes with a stand-in embedding model, and API auth fails closed.
+* ✅ Offline: the test suite passes against an in-memory stand-in for the Supabase policy tables (same filters as the SQL), ingestion stores all five roles, failed rebuilds keep the live build, and API auth fails closed.
 * ❌ Not verified here: real Gemini embeddings and chat, Groq chat, and real Supabase token and profile lookups. These need your credentials. Run `python ingest.py`, then test `/chat` with a real token.

@@ -6,7 +6,6 @@ LLM are offline fakes from conftest. No production credentials are used.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -17,10 +16,10 @@ from langchain_core.outputs import ChatResult
 
 import ingest
 import src.role_manager as role_manager
-from ingest import RoleOutcome, run_ingestion, write_ingest_report
+from ingest import run_ingestion
 from main import app, get_pipeline
 from src.config import Role
-from src.rag_pipeline import INGEST_REPORT_FILE, RAGPipeline
+from src.rag_pipeline import RAGPipeline
 from tests.conftest import FailingEmbeddings, RecordingChatModel, make_settings
 
 # --- Mock Supabase ---------------------------------------------------------------------
@@ -89,11 +88,10 @@ def add_tenant_doc(settings, role_folder: str, tenant: str, name: str) -> None:
 
 
 @pytest.fixture
-def built_settings(test_settings, embeddings):
+def built_settings(test_settings, embeddings, store):
     add_tenant_doc(test_settings, "support_executive", TENANT_A, "tenant_a_confidential.pdf")
-    outcomes = run_ingestion(test_settings, list(Role), embeddings=embeddings)
+    outcomes = run_ingestion(test_settings, list(Role), embeddings=embeddings, store=store)
     assert all(o.status == "built" for o in outcomes), outcomes
-    write_ingest_report(test_settings, outcomes)
     return test_settings
 
 
@@ -103,8 +101,8 @@ def llm():
 
 
 @pytest.fixture
-def client(built_settings, embeddings, llm, supabase):
-    pipeline = RAGPipeline(built_settings, embeddings=embeddings, llm=llm)
+def client(built_settings, embeddings, llm, supabase, store):
+    pipeline = RAGPipeline(built_settings, embeddings=embeddings, llm=llm, store=store)
     app.dependency_overrides[get_pipeline] = lambda: pipeline
     with TestClient(app) as c:
         yield c
@@ -180,11 +178,8 @@ def test_admin_sees_only_tenant_scoped_counts(client) -> None:
     assert all(i["documents"] == [] and i["tenants"] == [] for i in b.values())
 
 
-def test_admin_count_hidden_for_legacy_manifest(client, built_settings) -> None:
-    manifest_path = built_settings.vectorstore_dir / "support_executive" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest.pop("tenant_chunk_counts")
-    manifest_path.write_text(json.dumps(manifest))
+def test_admin_count_hidden_without_tenant_counts(client, fake_db) -> None:
+    fake_db.indexes["SUPPORT_EXECUTIVE"]["tenant_chunk_counts"] = None
     item = status_call(client, "tok.admin.b", {"roles": ["SUPPORT_EXECUTIVE"]}).json()["indexes"][0]
     assert item["index_built"] and item["chunk_count"] is None  # never the all-tenant total
 
@@ -194,13 +189,10 @@ def test_non_admin_roles_denied_status(client, token) -> None:
     assert status_call(client, token).status_code == 403
 
 
-def test_ingest_status_is_read_only(client, built_settings) -> None:
-    def snapshot() -> dict[str, float]:
-        return {str(p): p.stat().st_mtime_ns for p in built_settings.vectorstore_dir.rglob("*")}
-
-    before = snapshot()
+def test_ingest_status_is_read_only(client, fake_db) -> None:
+    fake_db.requests.clear()
     assert status_call(client, "tok.super.admin").status_code == 200
-    assert snapshot() == before
+    assert fake_db.requests and all(method == "GET" for method, _ in fake_db.requests)
     for method in ("get", "put", "delete"):
         assert getattr(client, method)("/ingest/status", headers=auth("tok.super.admin")).status_code == 405
 
@@ -250,8 +242,8 @@ def _override_pipeline(pipeline: RAGPipeline) -> None:
     app.dependency_overrides[get_pipeline] = lambda: pipeline
 
 
-def test_query_embedding_failure_is_502(client, built_settings, llm) -> None:
-    _override_pipeline(RAGPipeline(built_settings, embeddings=FailingEmbeddings(), llm=llm))
+def test_query_embedding_failure_is_502(client, built_settings, llm, store) -> None:
+    _override_pipeline(RAGPipeline(built_settings, embeddings=FailingEmbeddings(), llm=llm, store=store))
     r = client.post("/chat", json={"question": "close my account"}, headers=auth("tok.customer.a"))
     assert r.status_code == 502 and "embedding" in r.json()["detail"]
     assert llm.calls == []
@@ -266,24 +258,26 @@ class ExplodingLLM(BaseChatModel):
         return "exploding"
 
 
-def test_llm_failure_is_502(client, built_settings, embeddings) -> None:
-    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=ExplodingLLM()))
+def test_llm_failure_is_502(client, built_settings, embeddings, store) -> None:
+    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=ExplodingLLM(), store=store))
     r = client.post("/chat", json={"question": "close my account"}, headers=auth("tok.customer.a"))
     assert r.status_code == 502 and "language model" in r.json()["detail"]
 
 
-def test_wrong_embedding_model_is_503(client, built_settings, embeddings, llm) -> None:
+def test_wrong_embedding_model_is_503(client, built_settings, embeddings, llm, store) -> None:
     other = built_settings.model_copy(update={"gemini_embedding_model": "text-embedding-004"})
-    _override_pipeline(RAGPipeline(other, embeddings=embeddings, llm=llm))
+    _override_pipeline(RAGPipeline(other, embeddings=embeddings, llm=llm, store=store))
     r = client.post("/chat", json={"question": "close my account"}, headers=auth("tok.customer.a"))
     assert r.status_code == 503 and llm.calls == []
 
 
-def test_corrupted_index_is_503_without_fallback(client, built_settings, embeddings, llm) -> None:
-    (built_settings.vectorstore_dir / "customer" / "index.faiss").write_bytes(b"garbage")
-    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=llm))
+@pytest.mark.parametrize("failure", ["down", "match", "missing"])
+def test_policy_store_failure_is_503(client, built_settings, embeddings, llm, store, fake_db, failure) -> None:
+    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=llm, store=store))
+    fake_db.fail.add(failure)
     r = client.post("/chat", json={"question": "close my account"}, headers=auth("tok.customer.a"))
     assert r.status_code == 503 and llm.calls == []
+    assert r.json() == {"detail": "The policy store is temporarily unavailable."}
 
 
 def test_unexpected_error_is_500_without_stack_trace(client) -> None:
@@ -308,8 +302,8 @@ def test_health_ok_when_all_ready_and_reveals_nothing_else(client) -> None:
     assert r.json() == {"status": "ok", "version": r.json()["version"], "indexes_built": 5, "indexes_total": 5}
 
 
-def test_health_degraded_when_indexes_missing(test_settings, embeddings) -> None:
-    _override_pipeline(RAGPipeline(test_settings, embeddings=embeddings))
+def test_health_degraded_when_indexes_missing(test_settings, embeddings, store) -> None:
+    _override_pipeline(RAGPipeline(test_settings, embeddings=embeddings, store=store))
     try:
         with TestClient(app) as c:
             body = c.get("/health").json()
@@ -335,24 +329,35 @@ def test_openapi_bearer_security() -> None:
     assert "security" not in spec["paths"]["/roles"]["get"]
 
 
-def test_ingest_cli_records_configuration_error(test_settings, monkeypatch) -> None:
+def test_health_degraded_when_supabase_down(client, fake_db) -> None:
+    fake_db.fail.add("down")
+    pipeline = app.dependency_overrides[get_pipeline]()
+    pipeline._index_cache = None  # drop the 30 s cache
+    body = client.get("/health").json()
+    assert body["status"] == "degraded" and body["indexes_built"] == 0
+
+
+def test_ingest_cli_configuration_error_exit_code(test_settings, monkeypatch, capsys) -> None:
     monkeypatch.setattr(ingest, "get_settings", lambda: test_settings)  # no GEMINI_API_KEY
     assert ingest.main([]) == 2
-    report = json.loads((test_settings.vectorstore_dir / INGEST_REPORT_FILE).read_text())
-    assert "GEMINI_API_KEY" in report["configuration_error"]
+    assert "GEMINI_API_KEY" in capsys.readouterr().err
 
 
-def test_ingest_report_redacts_secrets(test_settings) -> None:
-    leaked = "PermissionDenied: API key AIzaSyA1234567890abcdefghijklmnopqrstu is invalid"
-    write_ingest_report(test_settings, [RoleOutcome(Role.ADMIN, "failed", leaked)])
-    text = (test_settings.vectorstore_dir / INGEST_REPORT_FILE).read_text()
-    assert "AIzaSy" not in text and "[redacted]" in text
+def test_ingest_failure_detail_is_redacted(test_settings, store, fake_db) -> None:
+    class LeakyEmbeddings(FailingEmbeddings):
+        def embed_documents(self, texts):
+            raise RuntimeError("PermissionDenied: API key AIzaSyA1234567890abcdefghijklmnopqrstu is invalid")
+
+    outcome = run_ingestion(test_settings, [Role.ADMIN], embeddings=LeakyEmbeddings(), store=store)[0]
+    stored = fake_db.indexes["ADMIN"]["last_run_detail"]
+    assert outcome.status == "failed"
+    assert "AIzaSy" not in outcome.detail and "AIzaSy" not in stored and "[redacted]" in stored
 
 
-def test_manifest_records_tenant_counts(built_settings) -> None:
-    manifest = json.loads((built_settings.vectorstore_dir / "support_executive" / "manifest.json").read_text())
-    counts = manifest["tenant_chunk_counts"]
-    assert set(counts) == {"GLOBAL", TENANT_A} and sum(counts.values()) == manifest["chunk_count"]
+def test_index_row_records_tenant_counts(built_settings, fake_db) -> None:
+    row = fake_db.indexes["SUPPORT_EXECUTIVE"]
+    counts = row["tenant_chunk_counts"]
+    assert set(counts) == {"GLOBAL", TENANT_A} and sum(counts.values()) == row["chunk_count"]
 
 
 def test_llm_clients_have_bounded_timeout_and_retries() -> None:
@@ -380,8 +385,8 @@ def test_llm_fallback_is_opt_in_and_validated() -> None:
         make_settings(llm_provider="gemini", llm_fallback_provider="gemini")
 
 
-def test_fallback_answers_when_primary_llm_fails(client, built_settings, embeddings) -> None:
+def test_fallback_answers_when_primary_llm_fails(client, built_settings, embeddings, store) -> None:
     fallback = RecordingChatModel(response="Close via the app [account_terms_and_fees.pdf, p. 2]")
-    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=ExplodingLLM().with_fallbacks([fallback])))
+    _override_pipeline(RAGPipeline(built_settings, embeddings=embeddings, llm=ExplodingLLM().with_fallbacks([fallback]), store=store))
     r = client.post("/chat", json={"question": "close my account"}, headers=auth("tok.customer.a"))
     assert r.status_code == 200 and r.json()["found"] and fallback.calls

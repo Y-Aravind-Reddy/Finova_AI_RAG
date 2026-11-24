@@ -6,6 +6,7 @@ Docs: http://127.0.0.1:8000/docs
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -24,15 +25,15 @@ from src.config import ROLE_DESCRIPTIONS, ConfigurationError, Role, get_settings
 from src.rag_pipeline import (
     EmbeddingError,
     GenerationError,
-    IndexCorruptedError,
     IndexIncompatibleError,
     IndexNotFoundError,
     RAGPipeline,
     index_status,
     is_index_ready,
-    read_ingest_report,
+    last_ingest_report,
     tenant_visible_chunk_count,
 )
+from src.vector_store import VectorStoreError
 from src.role_manager import AuthError, AuthenticatedUser, get_current_user, require_roles
 
 # --- Logging with request ids ------------------------------------------------------------
@@ -114,7 +115,7 @@ class IngestStatusRequest(BaseModel):
 
 class IndexStatus(BaseModel):
     role: Role
-    directory_exists: bool
+    directory_exists: bool = Field(..., description="True when the role has a row in Supabase policy_indexes.")
     index_built: bool
     embedding_model_matches: bool
     built_at: str | None = None
@@ -141,9 +142,9 @@ class IngestReport(BaseModel):
 class IngestStatusResponse(BaseModel):
     indexes: list[IndexStatus]
     last_ingest: IngestReport | None = Field(
-        None, description="Outcome of the last `python ingest.py` run (SUPER_ADMIN only)."
+        None, description="Outcome of the last `python ingest.py` run per role (SUPER_ADMIN only)."
     )
-    note: str = "Indexes are built offline with `python ingest.py`; this endpoint is read-only."
+    note: str = "Policy chunks are stored in Supabase by `python ingest.py`; this endpoint is read-only."
 
 
 class ErrorResponse(BaseModel):
@@ -168,17 +169,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.groq_api_key is not None,
         bool(settings.supabase_url and settings.supabase_anon_key and settings.supabase_service_role_key),
     )
-    for role in Role:
-        status = index_status(role, settings)
-        if is_index_ready(status):
-            logger.info("Index %s ready (%s chunks)", role.value, status["chunk_count"])
-        else:
-            logger.error(
-                "Index %s NOT ready (built=%s, embedding_model_matches=%s). /chat for this role returns 503. "
-                "See /ingest/status (SUPER_ADMIN) or the ingest logs above.",
-                role.value, status["index_built"], status["embedding_model_matches"],
-            )
-    app.state.pipeline = RAGPipeline(settings)
+    pipeline = RAGPipeline(settings)
+    try:
+        statuses = await asyncio.to_thread(pipeline.index_statuses, tuple(Role), 0)
+    except (VectorStoreError, ConfigurationError) as exc:
+        logger.error("Supabase policy store not reachable at startup: %s. /chat returns 503 until fixed.", exc)
+    else:
+        for status in statuses:
+            if is_index_ready(status):
+                logger.info("Index %s ready (%s chunks)", status["role"], status["chunk_count"])
+            else:
+                logger.error(
+                    "Index %s NOT ready (built=%s, embedding_model_matches=%s). /chat for this role returns 503. "
+                    "See /ingest/status (SUPER_ADMIN) or the ingest logs above.",
+                    status["role"], status["index_built"], status["embedding_model_matches"],
+                )
+    app.state.pipeline = pipeline
     yield
     logger.info("Shutting down")
 
@@ -243,10 +249,15 @@ async def _auth_error(_: Request, exc: AuthError) -> JSONResponse:
 
 @app.exception_handler(IndexNotFoundError)
 @app.exception_handler(IndexIncompatibleError)
-@app.exception_handler(IndexCorruptedError)
 async def _index_error(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Index error: %s", exc)
     return JSONResponse(status_code=503, content={"detail": "The policy index for your role is not available. Please contact an administrator."})
+
+
+@app.exception_handler(VectorStoreError)
+async def _vector_store_error(_: Request, exc: VectorStoreError) -> JSONResponse:
+    logger.error("Vector store error: %s", exc)
+    return JSONResponse(status_code=503, content={"detail": "The policy store is temporarily unavailable."})
 
 
 @app.exception_handler(ConfigurationError)
@@ -282,13 +293,19 @@ _ERRORS = {
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health(pipeline: RAGPipeline = Depends(get_pipeline)) -> HealthResponse:
-    """Liveness check. Does not call external services or reveal configuration.
+    """Liveness check. Reveals no configuration.
 
-    Always HTTP 200 while the process is up (so Railway keeps it running and
-    /ingest/status stays reachable for diagnosis); ``status`` is ``degraded``
-    when any role index is missing or built with a different embedding model.
+    Reads the per-role rows from Supabase (cached for 30 s). Always HTTP 200
+    while the process is up (so Railway keeps it running and /ingest/status
+    stays reachable for diagnosis); ``status`` is ``degraded`` when Supabase is
+    unreachable or any role index is missing or built with a different
+    embedding model.
     """
-    statuses = [index_status(role, pipeline.settings) for role in Role]
+    try:
+        statuses = await asyncio.to_thread(pipeline.index_statuses)
+    except (VectorStoreError, ConfigurationError) as exc:
+        logger.error("Health check could not read the policy store: %s", exc)
+        return HealthResponse(status="degraded", version=__version__, indexes_built=0, indexes_total=len(Role))
     built = sum(1 for s in statuses if s["index_built"])
     ready = all(is_index_ready(s) for s in statuses)
     return HealthResponse(
@@ -349,14 +366,15 @@ async def ingest_status(
     """
     is_super = user.role == Role.SUPER_ADMIN
     selected = list(dict.fromkeys(body.roles)) if body and body.roles else list(Role)
+    rows = await asyncio.to_thread(pipeline.index_rows, 0)  # always fresh for admins
     statuses = []
     for role in selected:
-        status: dict[str, Any] = index_status(role, pipeline.settings)
+        status: dict[str, Any] = index_status(role, rows.get(role.value), pipeline.settings)
         if not is_super:
             status["documents"] = []
             status["tenants"] = []
             status["chunk_count"] = tenant_visible_chunk_count(status, user.tenant_id) if status["index_built"] else None
         status.pop("tenant_chunk_counts", None)
         statuses.append(IndexStatus(**status))
-    report = read_ingest_report(pipeline.settings) if is_super else None
+    report = last_ingest_report(rows) if is_super else None
     return IngestStatusResponse(indexes=statuses, last_ingest=IngestReport(**report) if report else None)

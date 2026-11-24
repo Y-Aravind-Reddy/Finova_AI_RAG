@@ -1,47 +1,47 @@
-"""Build one FAISS index per role from the PDFs in data/<role>/.
+"""Embed the PDFs in data/<role>/ and store them in the Supabase policy store.
 
 Usage:
-    python ingest.py                     # build missing/out-of-date indexes for all roles
+    python ingest.py                     # build missing/out-of-date roles
     python ingest.py --rebuild           # force rebuild of all roles
     python ingest.py --role CUSTOMER     # only one role (repeatable)
     python ingest.py --dry-run           # load + chunk only, no embeddings / API calls
 
-Rebuilds are safe: a new index is written to a temporary directory and swapped
-in only after it has been fully saved, so a failed run never destroys the
-previous working index.
+Requires the Supabase migration in supabase/migrations/ and, except for
+--dry-run, GEMINI_API_KEY, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
+
+Rebuilds are safe: chunks are inserted under a new build id and
+``activate_policy_build`` switches the role to it in one transaction, deleting
+the old build only then. A failed run leaves the previous build live and
+removes its own partial rows.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import logging
 import re
-import shutil
 import sys
-import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Any
 
-from langchain_community.vectorstores import FAISS
-from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain_core.embeddings import Embeddings
 from pydantic import ValidationError
 
 from src.config import ConfigurationError, Role, Settings, get_settings
 from src.document_loader import DocumentLoadError, LoadResult, load_role_documents
 from src.embeddings import embedding_model_id, get_embeddings
-from src.rag_pipeline import INGEST_REPORT_FILE, MANIFEST_FILE, read_manifest, role_index_dir
+from src.vector_store import SupabasePolicyStore, VectorStoreError, vector_literal
 
 logger = logging.getLogger("ingest")
 
-# Bump when the manifest gains fields the API relies on; forces a one-time rebuild.
-MANIFEST_VERSION = 2
+# Bump when stored fields change in a way that requires re-embedding.
+MANIFEST_VERSION = 3
 
-# Provider error messages are stored in the report; scrub anything key/token-like.
+# Provider error messages are stored in Supabase; scrub anything key/token-like.
 _SECRET_RE = re.compile(r"(AIza[0-9A-Za-z_\-]{20,}|gsk_[0-9A-Za-z]{20,}|eyJ[0-9A-Za-z_\-]+\.[0-9A-Za-z_\-.]+|sk-[0-9A-Za-z]{20,})")
 
 
@@ -57,10 +57,10 @@ class RoleOutcome:
 
 
 def source_fingerprint(result: LoadResult, settings: Settings) -> str:
-    """Hash of inputs that affect the index; unchanged fingerprint => skip rebuild."""
+    """Hash of inputs that affect the stored chunks; unchanged => skip rebuild."""
     digest = hashlib.sha256()
     digest.update(f"manifest-v{MANIFEST_VERSION}".encode())
-    digest.update(embedding_model_id(settings).encode())
+    digest.update(f"{embedding_model_id(settings)}@{settings.embedding_dimensions}".encode())
     digest.update(f"{settings.chunk_size}:{settings.chunk_overlap}".encode())
     for doc_id, path, tenant in sorted(
         {(c.metadata["doc_id"], c.metadata["source_path"], c.metadata["tenant_id"]) for c in result.chunks}
@@ -69,18 +69,21 @@ def source_fingerprint(result: LoadResult, settings: Settings) -> str:
     return digest.hexdigest()
 
 
-def _swap_into_place(build_dir: Path, target_dir: Path) -> None:
-    """Replace ``target_dir`` with ``build_dir`` keeping a backup until success."""
-    backup_dir = target_dir.with_name(f".{target_dir.name}.old-{int(time.time() * 1000)}")
-    if target_dir.exists():
-        target_dir.rename(backup_dir)
-    try:
-        build_dir.rename(target_dir)
-    except OSError:
-        if backup_dir.exists():
-            backup_dir.rename(target_dir)  # restore previous index
-        raise
-    shutil.rmtree(backup_dir, ignore_errors=True)
+def build_manifest(role: Role, result: LoadResult, settings: Settings, fingerprint: str) -> dict[str, Any]:
+    return {
+        "role": role.value,
+        "embedding_model": embedding_model_id(settings),
+        "embedding_dimensions": settings.embedding_dimensions,
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        "chunk_count": len(result.chunks),
+        "page_count": result.pages,
+        "documents": sorted(set(result.files_loaded)),
+        "tenant_chunk_counts": dict(sorted(Counter(c.metadata["tenant_id"] for c in result.chunks).items())),
+        "manifest_version": MANIFEST_VERSION,
+        "skipped_files": result.errors,
+        "fingerprint": fingerprint,
+    }
 
 
 def build_role_index(
@@ -88,43 +91,55 @@ def build_role_index(
     result: LoadResult,
     embeddings: Embeddings,
     settings: Settings,
+    store: SupabasePolicyStore,
     fingerprint: str,
-) -> Path:
-    """Embed ``result.chunks`` and atomically save the index for ``role``."""
-    target_dir = role_index_dir(role, settings)
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    build_dir = target_dir.with_name(f".{target_dir.name}.building-{int(time.time() * 1000)}")
-    build_dir.mkdir(parents=True)
-    try:
-        store = FAISS.from_documents(
-            result.chunks,
-            embeddings,
-            normalize_L2=True,
-            distance_strategy=DistanceStrategy.EUCLIDEAN_DISTANCE,
+) -> str:
+    """Embed ``result.chunks``, upload them as a new build and make it live. Returns the build id."""
+    vectors = embeddings.embed_documents([c.page_content for c in result.chunks])
+    if len(vectors) != len(result.chunks):
+        raise RuntimeError(f"Embedding provider returned {len(vectors)} vectors for {len(result.chunks)} chunks")
+    bad = {len(v) for v in vectors if len(v) != settings.embedding_dimensions}
+    if bad:
+        raise ConfigurationError(
+            f"Embeddings have {sorted(bad)} dimensions but EMBEDDING_DIMENSIONS={settings.embedding_dimensions} "
+            "(must match the vector(N) column in the Supabase migration)."
         )
-        store.save_local(str(build_dir))
-        manifest = {
-            "role": role.value,
-            "built_at": datetime.now(timezone.utc).isoformat(),
-            "embedding_model": embedding_model_id(settings),
-            "chunk_size": settings.chunk_size,
-            "chunk_overlap": settings.chunk_overlap,
-            "chunk_count": len(result.chunks),
-            "page_count": result.pages,
-            "documents": sorted(set(result.files_loaded)),
-            "tenants": sorted({c.metadata["tenant_id"] for c in result.chunks}),
-            "tenant_chunk_counts": dict(sorted(Counter(c.metadata["tenant_id"] for c in result.chunks).items())),
-            "manifest_version": MANIFEST_VERSION,
-            "skipped_files": result.errors,
-            "fingerprint": fingerprint,
+
+    build_id = str(uuid.uuid4())
+    rows = [
+        {
+            "build_id": build_id,
+            "role_scope": chunk.metadata["role_scope"],
+            "allowed_roles": chunk.metadata["allowed_roles"],
+            "tenant_id": chunk.metadata["tenant_id"],
+            "chunk_id": chunk.metadata["chunk_id"],
+            "doc_id": chunk.metadata["doc_id"],
+            "source": chunk.metadata["source"],
+            "source_path": chunk.metadata["source_path"],
+            "page": int(chunk.metadata["page"]),
+            "content": chunk.page_content,
+            "embedding": vector_literal(vector),
         }
-        (build_dir / MANIFEST_FILE).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        (build_dir / ".gitkeep").touch()
-        _swap_into_place(build_dir, target_dir)
-    finally:
-        if build_dir.exists():
-            shutil.rmtree(build_dir, ignore_errors=True)
-    return target_dir
+        for chunk, vector in zip(result.chunks, vectors)
+    ]
+    try:
+        store.insert_chunks(rows)
+        store.activate_build(role, build_id, build_manifest(role, result, settings, fingerprint))
+    except Exception:
+        try:  # remove this run's partial rows; the previous build stays live
+            store.delete_build(role, build_id)
+        except Exception as cleanup_exc:  # noqa: BLE001
+            logger.warning("Could not remove partial build %s for %s: %s", build_id, role.value, type(cleanup_exc).__name__)
+        raise
+    return build_id
+
+
+def _record(store: SupabasePolicyStore, outcome: RoleOutcome) -> None:
+    """Best-effort: store the outcome so SUPER_ADMIN can read it via /ingest/status."""
+    try:
+        store.record_run(outcome.role, outcome.status, _redact(outcome.detail), datetime.now(timezone.utc).isoformat())
+    except (VectorStoreError, ConfigurationError) as exc:
+        logger.warning("Could not record ingest outcome for %s: %s", outcome.role.value, exc)
 
 
 def run_ingestion(
@@ -134,64 +149,68 @@ def run_ingestion(
     strict: bool = False,
     dry_run: bool = False,
     embeddings: Embeddings | None = None,
+    store: SupabasePolicyStore | None = None,
 ) -> list[RoleOutcome]:
-    """Ingest each role independently; one role's failure does not stop the others."""
-    if not dry_run and embeddings is None:
-        embeddings = get_embeddings(settings)  # raises ConfigurationError if key missing
+    """Ingest each role independently; one role's failure does not stop the others.
+
+    Raises:
+        ConfigurationError: missing Gemini key or Supabase settings.
+        VectorStoreError: Supabase unreachable or the migration is not applied.
+    """
+    existing: dict[str, dict[str, Any]] = {}
+    if not dry_run:
+        settings.require_supabase_service()  # fail before any paid embedding call
+        if embeddings is None:
+            embeddings = get_embeddings(settings)  # raises ConfigurationError if key missing
+        store = store or SupabasePolicyStore(settings)
+        existing = store.fetch_indexes()
 
     outcomes: list[RoleOutcome] = []
     for role in roles:
-        try:
-            result = load_role_documents(
-                role, settings.data_dir, settings.chunk_size, settings.chunk_overlap, strict=strict
-            )
-        except DocumentLoadError as exc:
-            outcomes.append(RoleOutcome(role, "failed", str(exc)))
-            continue
-
-        summary = f"{len(result.files_loaded)} PDFs, {result.pages} pages, {len(result.chunks)} chunks"
-        if result.errors:
-            summary += f"; skipped invalid: {', '.join(result.errors)}"
-
-        if dry_run:
-            outcomes.append(RoleOutcome(role, "dry-run", summary))
-            continue
-
-        fingerprint = source_fingerprint(result, settings)
-        existing = read_manifest(role_index_dir(role, settings))
-        if not rebuild and existing and existing.get("fingerprint") == fingerprint:
-            outcomes.append(RoleOutcome(role, "skipped", "index up to date (use --rebuild to force)"))
-            continue
-
-        try:
-            assert embeddings is not None
-            build_role_index(role, result, embeddings, settings, fingerprint)
-            outcomes.append(RoleOutcome(role, "built", summary))
-        except Exception as exc:  # embedding API / disk errors; keep previous index
-            logger.exception("Failed to build index for %s", role.value)
-            outcomes.append(RoleOutcome(role, "failed", _redact(f"{type(exc).__name__}: {exc}")))
+        outcome = _ingest_role(role, settings, rebuild, strict, dry_run, embeddings, store, existing)
+        outcomes.append(outcome)
+        if store is not None and not dry_run:
+            _record(store, outcome)
     return outcomes
 
 
-def write_ingest_report(
-    settings: Settings, outcomes: list[RoleOutcome], configuration_error: str | None = None
-) -> None:
-    """Persist the run outcome so SUPER_ADMIN can see *why* indexes are missing
-    via /ingest/status (container logs are otherwise the only record)."""
-    report = {
-        "finished_at": datetime.now(timezone.utc).isoformat(),
-        "configuration_error": _redact(configuration_error) if configuration_error else None,
-        "roles": {o.role.value: {"status": o.status, "detail": _redact(o.detail)} for o in outcomes},
-    }
+def _ingest_role(
+    role: Role,
+    settings: Settings,
+    rebuild: bool,
+    strict: bool,
+    dry_run: bool,
+    embeddings: Embeddings | None,
+    store: SupabasePolicyStore | None,
+    existing: dict[str, dict[str, Any]],
+) -> RoleOutcome:
     try:
-        settings.vectorstore_dir.mkdir(parents=True, exist_ok=True)
-        (settings.vectorstore_dir / INGEST_REPORT_FILE).write_text(json.dumps(report, indent=2), encoding="utf-8")
-    except OSError as exc:
-        logger.warning("Could not write ingest report: %s", exc)
+        result = load_role_documents(role, settings.data_dir, settings.chunk_size, settings.chunk_overlap, strict=strict)
+    except DocumentLoadError as exc:
+        return RoleOutcome(role, "failed", str(exc))
+
+    summary = f"{len(result.files_loaded)} PDFs, {result.pages} pages, {len(result.chunks)} chunks"
+    if result.errors:
+        summary += f"; skipped invalid: {', '.join(result.errors)}"
+    if dry_run:
+        return RoleOutcome(role, "dry-run", summary)
+
+    fingerprint = source_fingerprint(result, settings)
+    row = existing.get(role.value) or {}
+    if not rebuild and row.get("active_build_id") and row.get("fingerprint") == fingerprint:
+        return RoleOutcome(role, "skipped", "index up to date (use --rebuild to force)")
+
+    try:
+        assert embeddings is not None and store is not None
+        build_role_index(role, result, embeddings, settings, store, fingerprint)
+        return RoleOutcome(role, "built", summary)
+    except Exception as exc:  # embedding API / Supabase errors; previous build stays live
+        logger.exception("Failed to build index for %s", role.value)
+        return RoleOutcome(role, "failed", _redact(f"{type(exc).__name__}: {exc}"))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build role-wise FAISS indexes from PDFs.")
+    parser = argparse.ArgumentParser(description="Embed role PDFs into the Supabase policy store.")
     parser.add_argument(
         "--role",
         action="append",
@@ -211,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs every request URL at INFO; keep ingestion output readable.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         settings = get_settings()
     except ValidationError as exc:
@@ -221,12 +242,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         outcomes = run_ingestion(settings, roles, args.rebuild, args.strict, args.dry_run)
     except ConfigurationError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        if not args.dry_run:
-            write_ingest_report(settings, [], configuration_error=str(exc))
+        print(f"Configuration error: {_redact(str(exc))}", file=sys.stderr)
         return 2
-    if not args.dry_run:
-        write_ingest_report(settings, outcomes)
+    except VectorStoreError as exc:
+        print(f"Supabase vector store error: {_redact(str(exc))}", file=sys.stderr)
+        return 2
 
     print("\nIngestion summary")
     print("-" * 60)

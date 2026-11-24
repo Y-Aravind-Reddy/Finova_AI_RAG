@@ -24,7 +24,8 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
 class Role(str, Enum):
     """The only roles recognised by the system. Do not add roles here casually:
-    every role needs its own data folder, vectorstore folder and profile value."""
+    every role needs its own data folder, profile value and an allowed value in the
+    policy_indexes/policy_chunks CHECK constraints (supabase/migrations/)."""
 
     SUPER_ADMIN = "SUPER_ADMIN"
     ADMIN = "ADMIN"
@@ -34,7 +35,7 @@ class Role(str, Enum):
 
     @property
     def folder_name(self) -> str:
-        """Folder name used under data/ and vectorstore/ (e.g. ``finance_analyst``)."""
+        """Folder name used under data/ (e.g. ``finance_analyst``)."""
         return self.value.lower()
 
 
@@ -94,6 +95,8 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-flash"
     gemini_embedding_model: str = "gemini-embedding-001"
+    # Must match the vector(N) column in the Supabase migration (3072 = Gemini default).
+    embedding_dimensions: int = Field(default=3072, ge=8, le=16000)
     groq_api_key: SecretStr | None = None
     groq_model: str = "openai/gpt-oss-120b"
     llm_provider: LLMProvider = LLMProvider.GEMINI
@@ -117,8 +120,6 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=1000, ge=100, le=8000)
     chunk_overlap: int = Field(default=200, ge=0, le=4000)
     retrieval_top_k: int = Field(default=5, ge=1, le=20)
-    # Candidates fetched from FAISS before tenant/permission filtering.
-    retrieval_fetch_k: int = Field(default=40, ge=1, le=500)
     # Minimum relevance score in [0, 1]; 0 disables the threshold.
     retrieval_score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     max_question_chars: int = Field(default=2000, ge=10, le=10000)
@@ -128,7 +129,7 @@ class Settings(BaseSettings):
     allow_demo_auth: bool = False
 
     # --- Paths / HTTP --------------------------------------------------------
-    vectorstore_path: str = "vectorstore"
+    # Policy chunks and embeddings live in Supabase (see supabase/migrations/).
     data_path: str = "data"
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
     # Optional regex for origins that change per deployment/preview, e.g.
@@ -193,8 +194,6 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         if self.llm_fallback_provider == self.llm_provider:
             raise ValueError("LLM_FALLBACK_PROVIDER must differ from LLM_PROVIDER (or be left blank)")
-        if self.retrieval_fetch_k < self.retrieval_top_k:
-            raise ValueError("RETRIEVAL_FETCH_K must be >= RETRIEVAL_TOP_K")
         if self.supabase_url and urlparse(self.supabase_url).path not in ("", "/"):
             raise ValueError("SUPABASE_URL must be the project base URL only (e.g. https://<ref>.supabase.co), without /rest/v1 or other paths")
         if self.supabase_url and not self.supabase_url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
@@ -210,11 +209,6 @@ class Settings(BaseSettings):
         return self
 
     # --- Derived paths ---------------------------------------------------------
-    @property
-    def vectorstore_dir(self) -> Path:
-        path = Path(self.vectorstore_path)
-        return path if path.is_absolute() else PROJECT_ROOT / path
-
     @property
     def data_dir(self) -> Path:
         path = Path(self.data_path)
@@ -245,6 +239,21 @@ class Settings(BaseSettings):
         if self.groq_api_key is None:
             raise ConfigurationError("GROQ_API_KEY is not set but LLM_PROVIDER=groq.")
         return self.groq_api_key.get_secret_value()
+
+    def require_supabase_service(self) -> tuple[str, str]:
+        """Return (url, service_role_key) for backend-only access (vector store)."""
+        missing = [
+            name
+            for name, value in (
+                ("SUPABASE_URL", self.supabase_url),
+                ("SUPABASE_SERVICE_ROLE_KEY", self.supabase_service_role_key),
+            )
+            if not value
+        ]
+        if missing:
+            raise ConfigurationError(f"Supabase is not configured; missing: {', '.join(missing)}")
+        assert self.supabase_url and self.supabase_service_role_key
+        return self.supabase_url, self.supabase_service_role_key.get_secret_value()
 
     def require_supabase(self) -> tuple[str, str, str]:
         """Return (url, anon_key, service_role_key) or raise."""

@@ -12,11 +12,12 @@ from tests.conftest import RecordingChatModel
 
 
 @pytest.fixture
-def client(test_settings, embeddings):
-    run_ingestion(test_settings, list(Role), embeddings=embeddings)
+def client(test_settings, embeddings, store):
+    run_ingestion(test_settings, list(Role), embeddings=embeddings, store=store)
     pipeline = RAGPipeline(
         test_settings,
         embeddings=embeddings,
+        store=store,
         llm=RecordingChatModel(response="Answer [account_terms_and_fees.pdf, p. 2]"),
     )
     app.dependency_overrides[get_pipeline] = lambda: pipeline
@@ -81,8 +82,8 @@ def test_ingest_status_permissions(client) -> None:
     assert len(full) == 5 and all(len(i["documents"]) == 2 for i in full)
 
 
-def test_missing_index_returns_503(test_settings, embeddings) -> None:
-    pipeline = RAGPipeline(test_settings, embeddings=embeddings, llm=RecordingChatModel())
+def test_missing_index_returns_503(test_settings, embeddings, store) -> None:
+    pipeline = RAGPipeline(test_settings, embeddings=embeddings, llm=RecordingChatModel(), store=store)
     app.dependency_overrides[get_pipeline] = lambda: pipeline
     as_user(Role.ADMIN)
     try:

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Railway / container entrypoint.
-# 1. Build (or reuse, if unchanged) the role indexes. Container disks are
-#    ephemeral, so without a volume this re-embeds on every deploy.
+# 1. Sync data/ into the Supabase policy store. Roles whose PDFs are unchanged
+#    are skipped (no embedding calls); a failure keeps the previous live build.
 # 2. Start the API on Railway's $PORT. The server starts even if ingestion
 #    failed, so /health and /ingest/status can report the problem.
 set -u
