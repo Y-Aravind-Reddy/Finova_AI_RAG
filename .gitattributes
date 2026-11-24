@@ -1,2 +1,4 @@
 *.sh text eol=lf
 *.pdf binary
+*.faiss binary
+*.pkl binary

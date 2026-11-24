@@ -1,0 +1,22 @@
+{
+  "role": "ADMIN",
+  "built_at": "2026-11-24T09:20:25.443617+00:00",
+  "embedding_model": "gemini:models/gemini-embedding-001",
+  "chunk_size": 1000,
+  "chunk_overlap": 200,
+  "chunk_count": 4,
+  "page_count": 4,
+  "documents": [
+    "operational_controls_policy.pdf",
+    "user_administration_policy.pdf"
+  ],
+  "tenants": [
+    "GLOBAL"
+  ],
+  "tenant_chunk_counts": {
+    "GLOBAL": 4
+  },
+  "manifest_version": 2,
+  "skipped_files": {},
+  "fingerprint": "a25348bf02eced85a2f98371993aece288f1d37a968c202e7915d5b04cf6fc01"
+}

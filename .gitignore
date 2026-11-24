@@ -10,10 +10,16 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Built vector indexes (rebuild with `python ingest.py`); keep folder placeholders
+# Built vector indexes. The role indexes for the FICTIONAL sample PDFs are
+# committed so a deploy has working indexes even if the startup re-embedding
+# fails (start.sh skips unchanged indexes). Never commit indexes built from
+# real tenant/customer documents. ingest_report.json and temp dirs stay local.
 vectorstore/**/*
 !vectorstore/*/
 !vectorstore/*/.gitkeep
+!vectorstore/*/index.faiss
+!vectorstore/*/index.pkl
+!vectorstore/*/manifest.json
 vectorstore/.*
 
 # Customer / tenant documents should not be committed. Sample PDFs are allowed.
